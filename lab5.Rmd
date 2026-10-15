@@ -1,30 +1,343 @@
 ---
-title: "lab4"
+title: "Miseq SOP Data Analysis Pipeline"
 author: "Akshita Sharma"
 date: "2026-10-08"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+# loading required packages
+library(here)
+library(dada2)
+library(ggplot2)
 ```
 
-## R Markdown
+# BIOL4315_Lab5
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+## 1.1 Download File
+```{r download-data}
+download.file(
+  url = "https://mothur.s3.us-east-2.amazonaws.com/wiki/miseqsopdata.zip",
+  destfile = here::here("data/miseqsopdata.zip"))
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+## 1.2 Unzip Data
+```{r unzip-data}
+unzip("data/miseqsopdata.zip")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## 1.3 Set path 
+```{r set-paths}
+# record path to data folder & check contents
+data_dir <- here::here("data/MiSeq_SOP")
+list.files(data_dir)
+```
+
+# Assessing Metadata
+
+## Examine metadata file
+```{r examine-metadata}
+read.delim(base::paste(data_dir,"mouse.dpw.metadata", sep = "/" ))[
+  order(read.delim(base::paste(data_dir,"mouse.dpw.metadata", sep = "/" ))[[2]]),]
+```
+
+# download reference data genome
+# Taxonomy file
+download.file(
+  url = "https://zenodo.org/record/4587955/files/silva_nr99_v138.1_wSpecies_train_set.fa.gz?download=1",
+  destfile = here::here(here::here("data/silva_nr99_v138.1_wSpecies_train_set.fa.gz")))
+
+# Required packages
+BiocManager::install("dada2")
+BiocManager::install("phyloseq")
+library("ggplot2")
+library("RColorBrewer")
+
+# loading libraries
+lapply(c("dada2","phyloseq","vegan","tidyverse",
+         "Biostrings"), library, character.only = T)
+
+
+#----------GETTING STARTED--------------#
+# All forward and reverse fastq file names have the exact format: samplename_r1_001.fastq and samplename_r2_001.fastq
+# Note the pattern
+fnFs <- sort(list.files(data_dir, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(data_dir, pattern="_R2_001.fastq", full.names = TRUE))
+
+#basename removes the folder names
+sample.names <- stringr::str_split_fixed(basename(fnFs),"_",2)[,1]
+sample.names
+
+
+#----------QUALITY CHECK----------------#
+# forward read quality
+# plotQualityProfile(fnFs[1:2])
+plotQualityProfile((fnFs))
+
+# reverse read quality
+# plotQualityProfile(fnRs[1:2])
+plotQualityProfile((fnRs))
+
+#-----------TRIMMING & FILTERING--------#
+dir.create(here::here("outputs/filtered"), recursive=TRUE)
+
+#R1
+filtFs <- here::here("outputs/filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+names(filtFs) <- sample.names
+
+#R2
+filtRs <- here::here("outputs/filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtRs) <- sample.names
+
+# Filtering & Trimming
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
+                     maxN=0, maxEE=c(2,2), truncQ = 2 ,rm.phix=TRUE,
+                     compress=TRUE, multithread = TRUE)
+
+# percent of reads was last per sample by dividing the number of reads out vs number of reads in
+out2 <- as.data.frame(out) %>% mutate(prop = (100*(reads.out/reads.in)))
+head(out2)
+
+# mean percent of sequences left
+mean(out2$prop)
+
+# min percent of sequences left
+min(out2$prop)
+
+# sample with lowest # of reads
+min(out2$reads.out)
+
+#---------------DENIOISING PROCESS---------#
+# estimate sq error rates from filtered files
+errF <- learnErrors(filtFs, multithread=T)
+errR <- learnErrors(filtRs, multithread=T)
+
+# visualize learned errors for filtered forward reads
+plotErrors(errF, nominalQ=TRUE)
+
+# visualize learned errors for filtered reverse reads
+p <- plotErrors(errR, nominalQ=TRUE)
+
+ggsave(filename = here::here("outputs", "ReverseReadErrorPlot.pdf"),
+       plot = p, 
+       width = 10,
+       height = 10,
+       units = "in")
+
+
+#---------------ASV inference--------------#
+# assessing ASV numbers
+dadaFs <- dada(filtFs, err=errF, multithread = TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread = TRUE)
+
+# examine sample 1's ASV count
+dadaFs[[1]]
+
+# PAIRED-END READ MERGING
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+# Inspect the merger data.frame from the first sample
+DT::datatable(mergers$F3D0,options = list(scrollX = TRUE, autoWidth = TRUE))
+
+# seq table construction
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+# examine seq length distribution for each ASV
+table(nchar(getSequences(seqtab)))
+
+# CHIMERA REMOVAL
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=F, verbose=TRUE)
+
+# Proportion ASVs were removed due to chimeras?
+100-(dim(seqtab.nochim)[2]/dim(seqtab)[2]*100)
+
+# Read retention: First Sanity Check
+getN <- function(x){ 
+  sum(getUniques(x))
+}
+sum(seqtab.nochim)/sum(seqtab)*100
+
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+
+# Calculate Proportion
+track <- as.data.frame(track) %>% mutate(prop_kept = round(nonchim/input*100,2))
+DT::datatable(track)
+
+#-----------Data Polishing Part 1------------#
+ASV_tbl <- as.data.frame(seqtab.nochim) %>% 
+  `colnames<-`(base::paste("ASV", seq(1:ncol(seqtab.nochim)), sep = ""))
+
+DT::datatable(ASV_tbl, options = list(scrollX = TRUE, autoWidth = TRUE))
+
+# remove mock community
+ASV_tbl <- as.data.frame(t(ASV_tbl[-nrow(ASV_tbl),]))
+
+# lets remove the ASVs that were only present in the mock communities
+ASV_tbl <- ASV_tbl %>% mutate(rs = rowSums(ASV_tbl)) %>% 
+  filter(rs > 0) %>% dplyr::select(-rs)
+
+# Using DNAStringSet from Biostrings to read the seqs 
+ASV_seqs <- DNAStringSet(base::colnames(seqtab.nochim) %>% 
+                           `names<-`(base::paste("ASV",seq(1:ncol(seqtab.nochim)),sep = "")))
+
+# Taxonomic Assignment
+taxa <- assignTaxonomy(seqtab.nochim, here::here("data/silva_nr99_v138.1_wSpecies_train_set.fa.gz"), multithread=TRUE)
+
+
+#------------Data polishing Part 2---------#
+taxa2 <- as.data.frame(taxa) %>% 
+  `row.names<-`(base::paste("ASV", seq(1:nrow(taxa)), sep = ""))
+
+DT::datatable(taxa2,options = list(scrollX = TRUE, autoWidth = TRUE))
+
+# Removing non-prokaryotuc ASVs
+taxa2 <- taxa2 %>% filter(Family != "Mitochondria") %>% filter(Order != "Chloroplast")
+
+taxa3 <- taxa2 %>% mutate(ASVs = row.names(taxa2)) %>% dplyr::select(ASVs, everything())
+
+ASV_tbl2 <- ASV_tbl %>% mutate(ASVs=row.names(ASV_tbl)) %>% dplyr::select(ASVs, everything())
+
+# Joining Taxa Table
+taxa3 <- taxa3 %>% inner_join(ASV_tbl2, by = "ASVs")
+
+# using taxa2 for Phyloseq
+taxa2 <- taxa2 %>% filter(rownames(taxa2)%in%taxa3$ASVs)
+ASV_tbl <- ASV_tbl %>% filter(row.names(ASV_tbl) %in% taxa3$ASVs)
+
+
+# table of relative abundance of taxa per sample
+taxa3[,(ncol(taxa2)+2):ncol(taxa3)] <- sweep(
+  taxa3[,(ncol(taxa2)+2):ncol(taxa3)],2,
+  colSums(taxa3[,(ncol(taxa2)+2):ncol(taxa3)]),'/')*100
+
+# Sanity Check: Do they sum to 100%?
+colSums(taxa3[,(ncol(taxa2)+2):ncol(taxa3)])
+
+# clean up the StringSet and export Fasta file
+ASV_seqs[names(ASV_seqs)%in%ASV_tbl2$ASVs]
+writeXStringSet(ASV_seqs[names(ASV_seqs)%in%ASV_tbl2$ASVs], here::here("outputs/mouse_ASVs.fa"))
+
+# lets check that the file is ok
+readLines(here::here("outputs/mouse_ASVs.fa"))[1:10]
+
+#---------------Accuracy evaluation--------------#
+# Evaluating DADA2’s accuracy on the mock community:
+unqs.mock <- seqtab.nochim["Mock",]
+unqs.mock <- sort(unqs.mock[unqs.mock>0], decreasing=TRUE) # Drop ASVs absent in the Mock
+cat("DADA2 inferred", length(unqs.mock), "sample sequences present in the Mock community.\n")
+
+# DADA2 inferred 20 sample sequences present in the Mock community:
+mock.ref <- getSequences(file.path(data_dir, "HMP_MOCK.v35.fasta"))
+match.ref <- sum(sapply(names(unqs.mock), function(x) any(grepl(x, mock.ref))))
+cat("Of those,", sum(match.ref), "were exact matches to the expected reference sequences.\n")
+
+
+#---------------SAMPLE ANALYSIS------------------#
+
+# lets see what it looks like
+mdta <- read.delim(base::paste(data_dir,"mouse.dpw.metadata", sep = "/" ))
+
+# Are the sample names similar to the sample names we have in the ASV table?
+length(mdta$group %in% colnames(ASV_tbl))
+
+# set the row names and massage the table
+mdta <- mdta %>% mutate(category = if_else(dpw > 100 , "Late","Early")) %>% 
+  mutate(gender = if_else(str_detect(group, "F"),"F","M")) %>%
+  mutate(subject = str_extract(str_split_fixed(group, "D", 2)[,1],"(\\d)+")) %>%
+  `row.names<-`(mdta$group)
+
+# Construct the phyloseq object and add the Biostrings element:
+# Generating the phyloseq object
+ps <- phyloseq(otu_table(as.matrix(ASV_tbl), taxa_are_rows=T), 
+               sample_data(mdta), 
+               tax_table(as.matrix(taxa2)))
+
+ps <- merge_phyloseq(ps, ASV_seqs)
+ps
+
+ps
+
+#--------------Alpha diversity Visualization---------#
+#Lets calculate richness and diversity
+#Shannon and Simpson are diversity estimators, ACE is a richness estimator, observed is how many ASVs we have (198)
+rnd <- estimate_richness(
+  ps, measures=c("Observed", "ACE","Shannon", "Simpson")) %>% 
+  dplyr::select(-se.ACE)
+
+DT::datatable(rnd[1:2])
+
+# Exporting table as csv
+write.csv(rnd, "outputs/rnd.csv", row.names = FALSE)
+
+# Plot the diversity and richness estimations
+rnd <- rnd %>% mutate(group = row.names(rnd))%>% inner_join(mdta, "group")
+
+# make a long table
+rndl <- rnd %>% gather("Estimator", "Value", 1:4) %>% 
+  mutate(rd = if_else(Estimator == "Observed" | Estimator == "ACE", 
+                      "Richness","Diversity"))
+
+p <- ggplot(rndl, aes (x=dpw, y=Value, color = Estimator, fill= Estimator))+
+  geom_bar(stat = "identity", position = position_dodge())+
+  facet_grid(rd~category, scales = "free") + 
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") + theme_bw()
+
+# save plot as pdf file
+ggsave(filename = here::here("outputs", "diversityRichnessPlot.pdf"),
+       plot = p, 
+       width = 10,
+       height = 8,
+       units = "in")
+
+#-----------------Beta Diversity---------------------#
+# Log transforming the data prior to using bray curtis so that overly abundant ASVs will not skew the results
+ps.prop <- transform_sample_counts(ps, function(otu) log1p(otu))
+
+# Perform the ordination
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+plot_ordination(ps.prop, ord.nmds.bray, color="category", title="Bray NMDS")
+
+# Taxa Distribution
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU)*100)
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20, x="dpw", fill="Family") + facet_wrap(~category, scales="free_x") +
+  ylab("Relative abundance (% of seqs/sample)")
+
+# Processing taxa tables
+fam <- as.data.frame(taxa3 %>% dplyr::select(Family, where(is.numeric)) %>% 
+                       group_by(Family) %>% summarise_all(sum))
+
+head(fam)
+
+# Sanity check: Does it some to 100%?
+colSums(fam[,2:ncol(fam)])
+
+# Others category summing all low-abundance families
+fam_o <- fam
+
+fam[2:ncol(fam)][fam[2:ncol(fam)]<1] <- 0
+fam_o[2:ncol(fam_o)][fam[2:ncol(fam_o)]>1] <- 0
+
+Others <-colSums(fam_o[2:ncol(fam_o)])
+
+fam[nrow(fam)+1,2:ncol(fam)] <- Others
+fam[nrow(fam),1] <- "Others"
+
+# Get a long table needed for ggplot2
+fam_l <- fam %>% gather("group","relab",2:ncol(fam)) %>%
+  inner_join(mdta,"group")
+head(fam_l)
+tail(fam)
+
+# Create a plot
+txplot <- ggplot(fam_l, aes(x = dpw, y=Family, size = relab))+ 
+  geom_point()+
+  facet_wrap(~category, scales = "free_x")
+txplot
