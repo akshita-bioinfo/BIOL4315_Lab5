@@ -1,101 +1,99 @@
 ---
-title: "Miseq SOP Data Analysis Pipeline"
+title: "BIOL4315 Miseq SOP Data Analysis Pipeline"
 author: "Akshita Sharma"
 date: "2026-10-08"
 output: html_document
 ---
 
+## Getting started
+### Load required libraries
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 # loading required packages
-library(here)
-library(dada2)
-library(ggplot2)
+library("here")
+library("dada2")
+library("ggplot2")
+library("RColorBrewer")
+library("phyloseq")
+library("vegan")
+library("tidyverse")
+library("Biostrings")
 ```
 
-# BIOL4315_Lab5
-
-## 1.1 Download File
-```{r download-data}
+### Download File, Unzip Data and Set Path
+# download file
+```{r}
 download.file(
   url = "https://mothur.s3.us-east-2.amazonaws.com/wiki/miseqsopdata.zip",
   destfile = here::here("data/miseqsopdata.zip"))
-```
 
-## 1.2 Unzip Data
-```{r unzip-data}
+# unzippig data
 unzip("data/miseqsopdata.zip")
-```
 
-## 1.3 Set path 
-```{r set-paths}
+# record path to data folder & check contents
+data_dir <- here::here("data/MiSeq_SOP")
+list.files(data_dir)
+
 # record path to data folder & check contents
 data_dir <- here::here("data/MiSeq_SOP")
 list.files(data_dir)
 ```
 
-# Assessing Metadata
-
-## Examine metadata file
-```{r examine-metadata}
+### Assessing Metadata
+```{r}
+# examine metadata
 read.delim(base::paste(data_dir,"mouse.dpw.metadata", sep = "/" ))[
   order(read.delim(base::paste(data_dir,"mouse.dpw.metadata", sep = "/" ))[[2]]),]
 ```
 
-# download reference data genome
-# Taxonomy file
+### Download reference data genome
+```{r}
 download.file(
   url = "https://zenodo.org/record/4587955/files/silva_nr99_v138.1_wSpecies_train_set.fa.gz?download=1",
   destfile = here::here(here::here("data/silva_nr99_v138.1_wSpecies_train_set.fa.gz")))
+```
 
-# Required packages
-BiocManager::install("dada2")
-BiocManager::install("phyloseq")
-library("ggplot2")
-library("RColorBrewer")
-
-# loading libraries
-lapply(c("dada2","phyloseq","vegan","tidyverse",
-         "Biostrings"), library, character.only = T)
-
-
-#----------GETTING STARTED--------------#
-# All forward and reverse fastq file names have the exact format: samplename_r1_001.fastq and samplename_r2_001.fastq
-# Note the pattern
+### Find forward Fastq files and sort alphabetically
+```{r}
 fnFs <- sort(list.files(data_dir, pattern="_R1_001.fastq", full.names = TRUE))
 fnRs <- sort(list.files(data_dir, pattern="_R2_001.fastq", full.names = TRUE))
+```
 
-#basename removes the folder names
+### Basename removes the folder names
+```{r}
 sample.names <- stringr::str_split_fixed(basename(fnFs),"_",2)[,1]
 sample.names
+```
 
-
-#----------QUALITY CHECK----------------#
-# forward read quality
-# plotQualityProfile(fnFs[1:2])
+## Quality Check
+### Plot read quality for forward and reverse reads
+```{r}
 plotQualityProfile((fnFs))
-
-# reverse read quality
-# plotQualityProfile(fnRs[1:2])
 plotQualityProfile((fnRs))
+```
 
-#-----------TRIMMING & FILTERING--------#
+## Filtering & Trimming
+```{r}
+# Create Directory
 dir.create(here::here("outputs/filtered"), recursive=TRUE)
 
-#R1
+# R1
 filtFs <- here::here("outputs/filtered", paste0(sample.names, "_F_filt.fastq.gz"))
 names(filtFs) <- sample.names
 
-#R2
+# R2
 filtRs <- here::here("outputs/filtered", paste0(sample.names, "_R_filt.fastq.gz"))
 names(filtRs) <- sample.names
 
-# Filtering & Trimming
+# Filtering & Trimming both forward and reverse reads
 out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
                      maxN=0, maxEE=c(2,2), truncQ = 2 ,rm.phix=TRUE,
                      compress=TRUE, multithread = TRUE)
+```
 
-# percent of reads was last per sample by dividing the number of reads out vs number of reads in
+## Summary matrix & read statistics
+```{r}
+# create dataframe
 out2 <- as.data.frame(out) %>% mutate(prop = (100*(reads.out/reads.in)))
 head(out2)
 
@@ -107,8 +105,10 @@ min(out2$prop)
 
 # sample with lowest # of reads
 min(out2$reads.out)
+```
 
-#---------------DENIOISING PROCESS---------#
+## Denoising Process
+```{r}
 # estimate sq error rates from filtered files
 errF <- learnErrors(filtFs, multithread=T)
 errR <- learnErrors(filtRs, multithread=T)
@@ -124,33 +124,38 @@ ggsave(filename = here::here("outputs", "ReverseReadErrorPlot.pdf"),
        width = 10,
        height = 10,
        units = "in")
+```
 
 
-#---------------ASV inference--------------#
+## ASV Inference
+```{r}
 # assessing ASV numbers
 dadaFs <- dada(filtFs, err=errF, multithread = TRUE)
 dadaRs <- dada(filtRs, err=errR, multithread = TRUE)
 
 # examine sample 1's ASV count
 dadaFs[[1]]
+```
 
-# PAIRED-END READ MERGING
+## Merge paired ends & Remove chimeras
+```{r}
+# Paired end read merging
 mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
 
 # Inspect the merger data.frame from the first sample
 DT::datatable(mergers$F3D0,options = list(scrollX = TRUE, autoWidth = TRUE))
 
-# seq table construction
+# Seq table construction
 seqtab <- makeSequenceTable(mergers)
 dim(seqtab)
 
-# examine seq length distribution for each ASV
+# Examine seq length distribution for each ASV
 table(nchar(getSequences(seqtab)))
 
-# CHIMERA REMOVAL
+# Chimera removal
 seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=F, verbose=TRUE)
 
-# Proportion ASVs were removed due to chimeras?
+# Proportion of ASVs were removed due to chimeras?
 100-(dim(seqtab.nochim)[2]/dim(seqtab)[2]*100)
 
 # Read retention: First Sanity Check
@@ -167,8 +172,10 @@ rownames(track) <- sample.names
 # Calculate Proportion
 track <- as.data.frame(track) %>% mutate(prop_kept = round(nonchim/input*100,2))
 DT::datatable(track)
+```
 
-#-----------Data Polishing Part 1------------#
+## Data Polishing Part 1
+```{r}
 ASV_tbl <- as.data.frame(seqtab.nochim) %>% 
   `colnames<-`(base::paste("ASV", seq(1:ncol(seqtab.nochim)), sep = ""))
 
@@ -187,9 +194,10 @@ ASV_seqs <- DNAStringSet(base::colnames(seqtab.nochim) %>%
 
 # Taxonomic Assignment
 taxa <- assignTaxonomy(seqtab.nochim, here::here("data/silva_nr99_v138.1_wSpecies_train_set.fa.gz"), multithread=TRUE)
+```
 
-
-#------------Data polishing Part 2---------#
+## Data Polishing Part 2
+```{r}
 taxa2 <- as.data.frame(taxa) %>% 
   `row.names<-`(base::paste("ASV", seq(1:nrow(taxa)), sep = ""))
 
@@ -224,8 +232,10 @@ writeXStringSet(ASV_seqs[names(ASV_seqs)%in%ASV_tbl2$ASVs], here::here("outputs/
 
 # lets check that the file is ok
 readLines(here::here("outputs/mouse_ASVs.fa"))[1:10]
+```
 
-#---------------Accuracy evaluation--------------#
+## Accuracy evaluation
+```{r}
 # Evaluating DADA2’s accuracy on the mock community:
 unqs.mock <- seqtab.nochim["Mock",]
 unqs.mock <- sort(unqs.mock[unqs.mock>0], decreasing=TRUE) # Drop ASVs absent in the Mock
@@ -235,10 +245,10 @@ cat("DADA2 inferred", length(unqs.mock), "sample sequences present in the Mock c
 mock.ref <- getSequences(file.path(data_dir, "HMP_MOCK.v35.fasta"))
 match.ref <- sum(sapply(names(unqs.mock), function(x) any(grepl(x, mock.ref))))
 cat("Of those,", sum(match.ref), "were exact matches to the expected reference sequences.\n")
+```
 
-
-#---------------SAMPLE ANALYSIS------------------#
-
+## Sample Analysis
+```{r}
 # lets see what it looks like
 mdta <- read.delim(base::paste(data_dir,"mouse.dpw.metadata", sep = "/" ))
 
@@ -259,12 +269,12 @@ ps <- phyloseq(otu_table(as.matrix(ASV_tbl), taxa_are_rows=T),
 
 ps <- merge_phyloseq(ps, ASV_seqs)
 ps
+```
 
-ps
-
-#--------------Alpha diversity Visualization---------#
-#Lets calculate richness and diversity
-#Shannon and Simpson are diversity estimators, ACE is a richness estimator, observed is how many ASVs we have (198)
+## Alpha diversity Visualization
+calculates richness and duversity. Shannon and Simpson are diversity estimators, ACE is a richness estimator, observed is how many ASVs we have (198)
+```{r}
+# calculate richness and diversity
 rnd <- estimate_richness(
   ps, measures=c("Observed", "ACE","Shannon", "Simpson")) %>% 
   dplyr::select(-se.ACE)
@@ -294,9 +304,12 @@ ggsave(filename = here::here("outputs", "diversityRichnessPlot.pdf"),
        width = 10,
        height = 8,
        units = "in")
+```
 
-#-----------------Beta Diversity---------------------#
-# Log transforming the data prior to using bray curtis so that overly abundant ASVs will not skew the results
+## Beta Diversity
+Log transforming the data prior to using bray curtis so that overly abundant ASVs will not skew the results
+```{r}
+# Log transformation of data
 ps.prop <- transform_sample_counts(ps, function(otu) log1p(otu))
 
 # Perform the ordination
@@ -313,7 +326,6 @@ plot_bar(ps.top20, x="dpw", fill="Family") + facet_wrap(~category, scales="free_
 # Processing taxa tables
 fam <- as.data.frame(taxa3 %>% dplyr::select(Family, where(is.numeric)) %>% 
                        group_by(Family) %>% summarise_all(sum))
-
 head(fam)
 
 # Sanity check: Does it some to 100%?
@@ -341,3 +353,4 @@ txplot <- ggplot(fam_l, aes(x = dpw, y=Family, size = relab))+
   geom_point()+
   facet_wrap(~category, scales = "free_x")
 txplot
+```

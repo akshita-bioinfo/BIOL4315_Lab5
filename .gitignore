@@ -8,3 +8,4 @@ outputs/*
 !outputs/mouse_ASVs.fa
 !outputs/ReverseReadErrorPlot.pdf
 !outputs/rnd.csv
+!outputs/lab5.html
