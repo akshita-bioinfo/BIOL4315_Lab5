@@ -3,4 +3,8 @@
 .RData
 .Ruserdata
 data/
-outputs/
+outputs/*
+!outputs/diversityRichnessPlot.pdf
+!outputs/mouse_ASVs.fa
+!outputs/ReverseReadErrorPlot.pdf
+!outputs/rnd.csv

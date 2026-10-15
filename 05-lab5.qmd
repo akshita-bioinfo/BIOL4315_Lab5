@@ -12,15 +12,90 @@ Quarto enables you to weave together content and executable code into a finished
 
 When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
 
-```{r}
-1 + 1
-```
+## Quality Check
 
-You can add options to executable code like this
+code chunk that checks all forward read & reverse read files
 
 ```{r}
-#| echo: false
-2 * 2
+# loading required library
+library(dada2)
+
+# forward read quality
+plotQualityProfile((fnFs))
+
+# reverse read quality
+plotQualityProfile((fnRs))
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+## Filtering and Trimming
+
+code chunk that estimates and visualizes error rates
+
+```{r}
+# loading required library
+library(dada2)
+
+# sequence error rate
+errR <- learnErrors(filtRs, multithread=T)
+
+# visualize learned errors for filtered reverse reads
+plotErrors(errR, nominalQ=TRUE)
+```
+
+export reverse read error plot as pdf
+
+```{r}
+p <- plotErrors(errR, nominalQ=TRUE)
+ggsave(filename = here::here("outputs", "ReverseReadErrorPlot.pdf"),
+       plot = p, 
+       width = 10,
+       height = 10,
+       units = "in")
+```
+
+Error plots are not similar for forward and reverse reads
+
+## Data Polishing Part2
+
+ASVs with no species and genus: ASV22 (phylum firmicutes) & ASV207 (phylum Actinobacteria)
+
+### Top hits for ASV22:
+
+g-proteobacteria has a top hit with E-value of 2e-33 & percent identity of 86.49%.
+
+### Top hits for ASV207:
+
+firmicutes has a top hit with E-value of 4e-20 & oercent identity of 63.86%.
+
+No, we can not resolve species as percent identity is too low. Also, running against clusteredNR gives the name of clusteres ncestor not the exact species name.
+
+## Alpha diversity visualization
+
+Exporting table as a csv file
+
+```{r}
+write.csv(rnd, "outputs/rnd.csv", row.names = FALSE)
+```
+
+## Plot diversity and richness estimations
+
+```{r}
+# loading required library
+library("ggplot2")
+library("RColorBrewer")
+ggplot(rndl, aes (x=dpw, y=Value, color = Estimator, fill= Estimator))+
+  geom_bar(stat = "identity", position = position_dodge())+
+  facet_grid(rd~category, scales = "free") + 
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") + theme_bw()
+```
+
+## save plot as pdf
+
+```{r}
+ggsave(filename = here::here("outputs", "diversityRichnessPlot.pdf"),
+       plot = p, 
+       width = 10,
+       height = 8,
+       units = "in")
+```
